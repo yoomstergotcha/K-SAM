@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet18
+import torchvision.models as models
 
 class FiLM(nn.Module):
     """Produces (gamma, beta) for FiLM modulation."""
