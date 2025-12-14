@@ -1,10 +1,10 @@
 torch>=2.0.0
 torchvision>=0.15.0
-opencv-python
+opencv-python>=4.7
 Pillow
 scikit-image
 imageio
-numpy
+numpy>=1.23
 scipy
 tqdm
 pyyaml
@@ -12,7 +12,8 @@ lpips
 facenet-pytorch
 pytorch-fid
 pandas
-matplotlib
+mediapipe>=0.10
+matplotlib>=3.7
 seaborn
 dlib
 imutils
