@@ -80,94 +80,148 @@ class UpBlock(nn.Module):
         x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
         return self.conv(x)
 
-class SAMLiteGeneratorFiLM(nn.Module):
-    """
-    U-Net + FiLM with AGE-GATED skip connections.
-    Allows real geometric age change.
-    """
-    def __init__(self, base=64, age_emb_dim=128, age_min=0.0, age_max=80.0):
-        super().__init__()
-        self.age_min = age_min
-        self.age_max = age_max
 
+class ResNet18Encoder(nn.Module):
+    """
+    ResNet-18 backbone returning multi-scale feature maps
+    for U-Net-style decoding.
+    """
+    def __init__(self, pretrained=True):
+        super().__init__()
+        m = models.resnet18(weights="DEFAULT" if pretrained else None)
+
+        # Input conv (keep stride=2)
+        self.conv1 = m.conv1     # 64, stride 2
+        self.bn1   = m.bn1
+        self.relu  = m.relu
+        self.maxpool = m.maxpool # stride 2
+
+        # ResNet stages
+        self.layer1 = m.layer1   # 64   (32×32)
+        self.layer2 = m.layer2   # 128  (16×16)
+        self.layer3 = m.layer3   # 256  (8×8)
+        self.layer4 = m.layer4   # 512  (4×4)
+
+    def forward(self, x):
+        feats = {}
+
+        x = self.conv1(x)   # 64, 64×64
+        x = self.bn1(x)
+        x = self.relu(x)
+        feats["c1"] = x
+
+        x = self.maxpool(x) # 64, 32×32
+        x = self.layer1(x)  # 64, 32×32
+        feats["c2"] = x
+
+        x = self.layer2(x)  # 128, 16×16
+        feats["c3"] = x
+
+        x = self.layer3(x)  # 256, 8×8
+        feats["c4"] = x
+
+        x = self.layer4(x)  # 512, 4×4
+        feats["c5"] = x
+
+        return feats
+
+class SAMResNetFiLMGenerator(nn.Module):
+    """
+    ResNet18 encoder + FiLM bottleneck + UNet-style decoder.
+    Landmark head is attached to mid-level (32x32) feature to supervise geometry.
+    Returns:
+      img: (B,3,128,128) in [-1,1]
+      lm : (B,68,2) in [-1,1]
+    """
+    def __init__(self, age_emb_dim=128):
+        super().__init__()
+
+        # --- age embedding ---
         self.age_emb = AgeEmbed(age_emb_dim)
 
-        # encoder (age-agnostic)
-        self.in_conv = nn.Sequential(
-            nn.Conv2d(3, base, 3, padding=1),
-            nn.InstanceNorm2d(base),
-            nn.LeakyReLU(0.2, inplace=True)
-        )
-        self.d1 = DownBlock(base, base*2)     # 128 -> 64
-        self.d2 = DownBlock(base*2, base*4)   # 64  -> 32
-        self.d3 = DownBlock(base*4, base*4)   # 32  -> 16
+        # --- encoder ---
+        self.enc = ResNet18Encoder(pretrained=True)
 
-        # bottleneck (FiLM)
-        self.b1 = ResBlockFiLM(base*4, age_emb_dim)
-        self.b2 = ResBlockFiLM(base*4, age_emb_dim)
+        # --- bottleneck FiLM blocks ---
+        self.b1 = ResBlockFiLM(512, age_emb_dim)
+        self.b2 = ResBlockFiLM(512, age_emb_dim)
 
-        # decoder
-        self.u3 = UpBlock(base*4, base*4)
-        self.r32 = ResBlockFiLM(base*4 + base*4, age_emb_dim)
+        # --- learnable skip scales ---
+        self.skip_w_c4 = nn.Parameter(torch.tensor(1.0))  # for c4 (8x8)
+        self.skip_w_c3 = nn.Parameter(torch.tensor(1.0))  # for c3 (16x16)
+        self.skip_w_c2 = nn.Parameter(torch.tensor(1.0))  # for c2 (32x32)
+        self.skip_w_c1 = nn.Parameter(torch.tensor(1.0))  # for c1 (64x64)
 
-        self.u2 = UpBlock(base*4 + base*4, base*2)
-        self.r64 = ResBlockFiLM(base*2 + base*2, age_emb_dim)
+        # --- decoder ---
+        self.up4 = UpBlock(512, 256)            # 4 -> 8
+        self.r8  = ResBlockFiLM(256 + 256, age_emb_dim)
 
-        self.u1 = UpBlock(base*2 + base*2, base)
-        self.r128 = ResBlockFiLM(base + base, age_emb_dim)
+        self.up3 = UpBlock(256 + 256, 128)      # 8 -> 16
+        self.r16 = ResBlockFiLM(128 + 128, age_emb_dim)
 
-        self.out = nn.Sequential(
-            nn.Conv2d(base + base, 3, 1),
+        self.up2 = UpBlock(128 + 128, 64)       # 16 -> 32
+        self.r32 = ResBlockFiLM(64 + 64, age_emb_dim)
+
+        self.up1 = UpBlock(64 + 64, 64)         # 32 -> 64
+        self.r64 = ResBlockFiLM(64 + 64, age_emb_dim)
+
+        self.up0 = UpBlock(64 + 64, 64)         # 64 -> 128
+
+        # --- image head ---
+        self.out_img = nn.Sequential(
+            nn.Conv2d(64, 3, 1),
             nn.Tanh()
         )
 
-    def _norm_age(self, age):
-        return (age - self.age_min) / (self.age_max - self.age_min + 1e-8)
+        # --- landmark head ---
+        self.lm_conv = nn.Sequential(
+            nn.Conv2d(128, 128, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(128, 64, 3, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        self.lm_fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(64, 136),
+            nn.Tanh()   # landmarks in [-1,1]
+        )
 
-    def _skip_gate(self, age_src, age_tgt):
-        # age_src, age_tgt: (B,1)
-        gap = (age_tgt - age_src).abs()      # years
-        # 0y -> 1.0, 60y+ -> 0.2
-        gate = 1.0 - (gap / 60.0).clamp(0, 1) * 0.8
-        return gate.view(-1, 1, 1, 1)
+    def forward(self, x, age_src, age_tgt, age_min=0.0, age_max=80.0):
+        # normalize age to [0,1]
+        age = (age_tgt - age_min) / (age_max - age_min + 1e-8)  # (B,1)
+        age_emb = self.age_emb(age)
 
-    def forward(self, x, age_src, age_tgt):
-        same_age = torch.allclose(age_src, age_tgt)
-        # normalize target age
-        age_tgt_n = self._norm_age(age_tgt)
-        if same_age:
-          age_emb = None
-        else:
-          age_emb = self.age_emb(age_tgt_n)
+        # --- encode ---
+        feats = self.enc(x)
+        h = feats["c5"]                    # (B,512,4,4)
 
-
-        # encode
-        x0 = self.in_conv(x)
-        x1 = self.d1(x0)
-        x2 = self.d2(x1)
-        x3 = self.d3(x2)
-
-        # bottleneck
-        h = self.b1(x3, age_emb)
+        # --- bottleneck ---
+        h = self.b1(h, age_emb)
         h = self.b2(h, age_emb)
 
-        # skip gate
-        if same_age:
-          g = 1.0
-        else:
-          g = self._skip_gate(age_src, age_tgt)
+        # --- decode ---
+        h = self.up4(h)                    # -> (B,256,8,8)
+        h = torch.cat([h, self.skip_w_c4 * feats["c4"]], dim=1)
+        h = self.r8(h, age_emb)            # -> (B,512,8,8)
 
-        # decode with GATED skips
-        h = self.u3(h)
-        h = torch.cat([h, g * x2], dim=1)
-        h = self.r32(h, age_emb)
+        h = self.up3(h)                    # -> (B,128,16,16)
+        h = torch.cat([h, self.skip_w_c3 * feats["c3"]], dim=1)
+        h = self.r16(h, age_emb)           # -> (B,256,16,16)
 
-        h = self.u2(h)
-        h = torch.cat([h, g * x1], dim=1)
-        h = self.r64(h, age_emb)
+        h = self.up2(h)                    # -> (B,64,32,32)
+        h = torch.cat([h, self.skip_w_c2 * feats["c2"]], dim=1)
+        h = self.r32(h, age_emb)           # -> (B,128,32,32)
 
-        h = self.u1(h)
-        h = torch.cat([h, g * x0], dim=1)
-        h = self.r128(h, age_emb)
+        # ===== landmark prediction from MID-LEVEL structural feature =====
+        lm_feat = self.lm_conv(h)          # (B,64,32,32)
+        lm = self.lm_fc(lm_feat).view(-1, 68, 2)  # (B,68,2) in [-1,1]
 
-        return self.out(h)
+        h = self.up1(h)                    # -> (B,64,64,64)
+        h = torch.cat([h, self.skip_w_c1 * feats["c1"]], dim=1)
+        h = self.r64(h, age_emb)           # -> (B,128,64,64)
+
+        h = self.up0(h)                    # -> (B,64,128,128)
+        img = self.out_img(h)              # -> (B,3,128,128)
+
+        return img, lm
