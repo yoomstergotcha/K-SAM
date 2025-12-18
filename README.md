@@ -1,6 +1,6 @@
-# 👵 K-SAM: Identity-Preserving Facial Age Transformation
+# 👵 Identity-Preserving Korean Facial Age Transformation 
 
-This repository contains the implementation of **K-SAM**, a three-stage framework for facial age progression and regression with identity preservation. Our work is inspired in part by Only a Matter of Style: Age Transformation Using a Style-Based Regression Model, which demonstrates that facial aging can be modeled as a continuous transformation in latent style space rather than a purely discrete attribute translation problem.
+This repository contains the implementation of a three-stage framework for facial age progression and regression with identity preservation. Our work is inspired in part by Only a Matter of Style: Age Transformation Using a Style-Based Regression Model, which demonstrates that facial aging can be modeled as a continuous transformation in latent style space rather than a purely discrete attribute translation problem.
 
 ## Project Structure
 - `final_demo.ipynb`: Standalone Colab demo notebook 
@@ -20,10 +20,10 @@ The pipeline consists of:
 
 ## Repository Structure
 ```
-K-SAM/
+K-Aging/
 ├── demo.ipynb                # Standalone Colab demo
 ├── models/
-│   ├── generator.py          # SAM ResNet-FiLM generators
+│   ├── generator.py          # ResNet-FiLM generators
 │   ├── discriminator.py      # PatchGAN discriminator
 │   ├── ssrnet.py             # Age estimator
 │   └── encoders.py
@@ -40,6 +40,3 @@ K-SAM/
 ├── requirements.txt
 └── README.md
 ```
-
-## Authors
-
